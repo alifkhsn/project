@@ -1,0 +1,151 @@
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import LabelEncoder
+import joblib
+import os
+
+# --- Load the trained model and label encoder ---
+try:
+    model = joblib.load("D:/FYP/knn_model_latest1.pkl")
+    le = joblib.load("D:/FYP/label_encoder.pkl")
+    scaler = joblib.load("D:/FYP/scaler.pkl")
+except FileNotFoundError as e:
+    st.error(f"Error loading model or scaler: {e}")
+    st.stop()
+
+st.write("Current working directory:", os.getcwd())
+
+# --- Define feature columns used during training ---
+FEATURE_COLUMNS = [
+    'duration', 'total_fiat', 'total_biat', 'min_fiat', 'min_biat', 
+    'max_fiat', 'max_biat', 'mean_fiat', 'mean_biat', 
+    'flowPktsPerSecond', 'flowBytesPerSecond', 
+    'min_flowiat', 'max_flowiat', 'mean_flowiat', 'std_flowiat', 
+    'min_active', 'mean_active', 'max_active', 'std_active', 
+    'min_idle', 'mean_idle', 'max_idle', 'std_idle'
+]
+
+# --- Set page title ---
+st.title("Encrypted Traffic Classification Dashboard")
+
+# --- Upload dataset ---
+uploaded_file = st.file_uploader("Upload your CSV dataset", type=["csv"])
+if uploaded_file is not None:
+    df = pd.read_csv(uploaded_file)
+
+    st.subheader("Raw Data")
+    st.dataframe(df.head())
+
+    # --- Check for required features ---
+    if all(col in df.columns for col in FEATURE_COLUMNS):
+        X = df[FEATURE_COLUMNS]
+
+        # --- Scale features and predict ---
+        X_scaled = scaler.transform(X)
+        predictions = model.predict(X_scaled)
+        predicted_labels = predictions  # Already decoded strings
+
+        # --- Add predictions to DataFrame ---
+        df['Predicted Class'] = predicted_labels
+        st.subheader("Data with Predictions")
+        st.dataframe(df.head())
+
+        # --- Prepare distribution for all classes (even if count is 0) ---
+        ALL_CLASSES = le.classes_
+        pred_counts = pd.Series(predicted_labels).value_counts().reindex(ALL_CLASSES, fill_value=0)
+
+        # --- Display class count table ---
+        st.write("Predicted Class Distribution:")
+        st.write(pred_counts)
+
+        # --- Bar Chart: Class Counts ---
+        st.subheader("Predicted Traffic Class Distribution")
+        fig, ax = plt.subplots(figsize=(10, 6))
+        pred_counts.plot(kind='bar', ax=ax, color='green')
+        ax.set_xlabel('Predicted Class')
+        ax.set_ylabel('Number of Records')
+        ax.set_title('Predicted Number of Records per Traffic Class')
+        plt.xticks(rotation=45, ha='right')
+        st.pyplot(fig)
+
+        # --- Duration per class (in hours) ---
+        if 'duration' in df.columns:
+            df['duration_hours'] = df['duration'] / 3_600_000
+            duration_per_class = df.groupby('Predicted Class')['duration_hours'].sum().reindex(le.classes_, fill_value=0).round(2)
+
+            st.subheader("Total Duration per Traffic Class (in Hours)")
+            st.dataframe(
+                duration_per_class.reset_index().rename(
+                    columns={'Predicted Class': 'Class', 'duration_hours': 'Total Duration (Hours)'}
+                )
+            )
+
+        # --- Estimated GB per class ---
+        if 'flowBytesPerSecond' in df.columns and 'duration' in df.columns:
+            df['duration_sec'] = df['duration'] / 1000
+            df['estimated_bytes'] = df['flowBytesPerSecond'] * df['duration_sec']
+            df['estimated_GB'] = df['estimated_bytes'] / 1_000_000_000
+
+            estimated_gb_per_class = df.groupby('Predicted Class')['estimated_GB'].sum().reindex(le.classes_, fill_value=0).round(2)
+
+            st.subheader("Estimated Total Data Transferred per Traffic Class (in GB)")
+            st.dataframe(
+                estimated_gb_per_class.reset_index().rename(
+                    columns={'Predicted Class': 'Traffic Class', 'estimated_GB': 'Total GB'}
+                )
+            )
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            estimated_gb_per_class.plot(kind='bar', ax=ax, color='orange')
+            ax.set_title('Estimated Total Data Transferred per Traffic Class (GB)')
+            ax.set_xlabel('Traffic Class')
+            ax.set_ylabel('Total Data (GB)')
+            plt.xticks(rotation=45, ha='right')
+            plt.tight_layout()
+            st.pyplot(fig)
+
+        # --- Pie Charts Section ---
+        st.markdown("---")
+        st.subheader("Traffic Classification Summary")
+
+        # --- Pie Chart 1: Predicted Class Distribution ---
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("### Predicted Class Distribution")
+            fig1, ax1 = plt.subplots(figsize=(6, 6))
+            ax1.pie(
+                pred_counts,
+                labels=pred_counts.index,
+                autopct='%1.1f%%',
+                startangle=140,
+                textprops={'fontsize': 8}
+            )
+            ax1.set_title("Traffic Type Breakdown", fontsize=12)
+            ax1.axis('equal')
+            st.pyplot(fig1)
+
+        # --- Pie Chart 2: VPN vs Non-VPN Split ---
+        df['is_vpn'] = df['Predicted Class'].str.startswith('VPN')
+        vpn_counts = df['is_vpn'].value_counts().sort_index()
+        labels_vpn = ['Non-VPN', 'VPN']
+
+        with col2:
+            st.markdown("### VPN vs Non-VPN Split")
+            fig2, ax2 = plt.subplots(figsize=(6, 6))
+            ax2.pie(
+                vpn_counts,
+                labels=labels_vpn,
+                autopct='%1.1f%%',
+                startangle=90,
+                colors=['#6EC6FF', '#FF9800'],
+                textprops={'fontsize': 10}
+            )
+            ax2.set_title("Encrypted vs Regular Traffic", fontsize=12)
+            ax2.axis('equal')
+            st.pyplot(fig2)
+
+    else:
+        missing = list(set(FEATURE_COLUMNS) - set(df.columns))
+        st.error(f"Missing required features in the dataset: {missing}")
